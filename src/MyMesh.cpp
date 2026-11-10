@@ -933,6 +933,15 @@ bool MyMesh::handleMeshcomodCommand(const char* text, int text_len) {
   if (strncasecmp(p, "ota", 3) == 0 && (p[3] == '\0' || p[3] == ' ' || p[3] == '\t')) {
     p += 3;
     while (*p == ' ' || *p == '\t') p++;
+#if defined(DUAL_BOOT_SELECTOR)
+    // Dual boot with Meshtastic: both the web upload ("ota start") and the HTTP OTA ("ota url")
+    // would write the next OTA slot, ota_0 = Meshtastic. Updates go over USB.
+    if ((strncasecmp(p, "start", 5) == 0 && (p[5] == '\0' || p[5] == ' ' || p[5] == '\t')) ||
+        (strncasecmp(p, "url", 3) == 0 && (p[3] == '\0' || p[3] == ' ' || p[3] == '\t'))) {
+      pushMeshcomodReply("ERR: dual boot build, OTA off (the other slot is Meshtastic); update over USB");
+      return true;
+    }
+#endif
     if (strncasecmp(p, "start", 5) == 0 && (p[5] == '\0' || p[5] == ' ' || p[5] == '\t')) {
       char reply[160];
       if (board.startOTAUpdate(_prefs.node_name, reply)) {

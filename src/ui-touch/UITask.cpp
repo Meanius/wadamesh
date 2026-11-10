@@ -45,6 +45,7 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #if defined(ESP32)
   #include <time.h>
   #include <SPIFFS.h>
+  #include "../helpers/esp32/DualBootFs.h"   // wadaSpiffsBegin(): the SPIFFS mount, with this firmware's partition label
   // Dedicated LittleFS instance for the map tile pack (separate
   // partition — see variants/heltec_v4/partitions_tft_touch.csv). Keeps
   // tiles out of the SPIFFS partition where /new_prefs + /contacts3 +
@@ -9477,9 +9478,14 @@ static void versionCheckUpdateUi() {
     lv_obj_set_style_text_color(s_update_about_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
   } else if (s_update_available && s_verchk_latest_n >= 0) {
     // Where to get it: the Install button when this install has one, else the flasher.
+#if defined(DUAL_BOOT_SELECTOR)
+    snprintf(b, sizeof b, LV_SYMBOL_DOWNLOAD "  Update available: beta_%d\nYou have beta_%d. Dual boot: update over USB.",
+             s_verchk_latest_n, my_n);
+#else
     snprintf(b, sizeof b, s_ota_btn ? TR(LV_SYMBOL_DOWNLOAD "  Update available: beta_%d\nYou have beta_%d. Install it below.")
                                     : TR(LV_SYMBOL_DOWNLOAD "  Update available: beta_%d\nYou have beta_%d. Get it at flasher.wadamesh.com."),
              s_verchk_latest_n, my_n);
+#endif
     lv_obj_set_style_text_color(s_update_about_lbl, lightSurfaceTextColor(0xE2A23A), LV_PART_MAIN);
   } else if (s_verchk_latest_n >= 0) {
     snprintf(b, sizeof b, TR(LV_SYMBOL_OK "  Up to date (beta_%d)"), my_n);
@@ -9647,7 +9653,11 @@ static void otaPollTimerCb(lv_timer_t* t) {
 // (target = latest) and the "reinstall an earlier version" buttons (target = a chosen older N).
 static void otaStartInstall(int target_n) {
   if (!touchHasOtaUpdateSlot()) {   // Launcher / no spare slot — the button shouldn't even be here
+#if defined(DUAL_BOOT_SELECTOR)
+    if (g_lv.task) g_lv.task->showAlert("Dual boot: update over USB", 3000);
+#else
     if (g_lv.task) g_lv.task->showAlert(TR("Update via the Launcher / flasher.wadamesh.com"), 3000);
+#endif
     return;
   }
   if (WiFi.status() != WL_CONNECTED) {
@@ -14802,6 +14812,11 @@ static void rebootCb(lv_event_t* e) {
 // "update manually" notice on the About page still shows. A null running/next
 // partition (e.g. an AppFS-hosted build) also reads as "no in-place OTA".
 static bool touchHasOtaUpdateSlot() {
+#if defined(DUAL_BOOT_SELECTOR)
+  // Dual boot with Meshtastic: this firmware runs from ota_1, and the "spare" slot esp_ota would
+  // write is ota_0, Meshtastic's. No in-place update at all; it goes over USB (About page note).
+  return false;
+#endif
   const esp_partition_t* nxt = esp_ota_get_next_update_partition(NULL);
   const esp_partition_t* run = esp_ota_get_running_partition();
   if (nxt == NULL || run == NULL) return false;
@@ -37110,6 +37125,12 @@ static const char* const OTA_BIN_NAME = "wadamesh-" WADA_BOARD_ID;
 // cache on the mutable bin. esp_https_ota isn't usable here (no on-device TLS — see tile notes).
 static void otaWorkerRun(WiFiClient& client, HTTPClient& http) {
   s_ota_pct = 0;
+#if defined(DUAL_BOOT_SELECTOR)
+  // Second stop behind touchHasOtaUpdateSlot(): Update.begin() would pick ota_0 = Meshtastic.
+  snprintf(s_ota_msg, sizeof s_ota_msg, "dual boot: update over USB");
+  s_ota_state = 3;
+  return;
+#endif
   char url[176];
   snprintf(url, sizeof url, "http://firmware.wadamesh.com/releases/%s/beta_%d/%s.bin",
            updChannelArchive(), s_ota_target_n, OTA_BIN_NAME);
@@ -43507,7 +43528,7 @@ static bool crashDumpExport(char* out_path, size_t out_cap) {
 #elif defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4)
   if (!dst) dst = &FFat;              // no SPIFFS on these boards; internal = the FAT data partition
 #else
-  if (!dst) { SPIFFS.begin(false); dst = &SPIFFS; }
+  if (!dst) { wadaSpiffsBegin(false); dst = &SPIFFS; }
 #endif
   File f = dst->open(path, "w");
   if (!f) return false;
@@ -43911,6 +43932,11 @@ static void buildAboutSettings() {
       lv_obj_add_flag(s_ota_status_lbl, LV_OBJ_FLAG_HIDDEN);   // otaStatusText shows it when there is news
       otaButtonRefreshState();   // primary or plain, and the previous-version row, from what is known
     }
+#if defined(DUAL_BOOT_SELECTOR)
+    // No Install button in a dual-boot build (touchHasOtaUpdateSlot() is false): say where updates go.
+    setNote(c, "Dual boot with Meshtastic: update over USB, with a dual-boot build into this slot. "
+               "The web flasher or a standard image would overwrite Meshtastic.");
+#endif
     // The beta channel. Outside the OTA-slot gate on purpose: Launcher installs have no
     // Install button, but still want channel-aware update notices and the SD download.
     if (FIRMWARE_OTA_ENV[0] && firmwareReleaseN() >= 0) {
@@ -53413,7 +53439,7 @@ static fs::FS* backupInternalFs() {
 #elif defined(HAS_TANMATSU)
   return &FFat;      // FAT data partition (locfd), mounted at boot; no SPIFFS here
 #else
-  SPIFFS.begin(false);
+  wadaSpiffsBegin(false);
   return &SPIFFS;
 #endif
 }
@@ -73805,7 +73831,7 @@ static bool uiDataFsReady() {
     // keep retrying the already-loaded internal backend if its first mount was
     // transiently unavailable. This avoids a RAM-only history session without
     // risking a switch to a card whose history was never loaded.
-    if (SPIFFS.begin(false)) {
+    if (wadaSpiffsBegin(false)) {
       s_ui_data_fs = &SPIFFS;
       s_ui_data_root[0] = '\0';
       return true;
@@ -73822,7 +73848,7 @@ static bool uiDataFsReady() {
     strncpy(s_ui_data_root, "/meshcomod", sizeof s_ui_data_root - 1);
     return true;
   }
-  if (SPIFFS.begin(false)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
+  if (wadaSpiffsBegin(false)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
 #elif defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4) || defined(HAS_CROWPANEL_P4_101)
   // Tanmatsu + T-Display P4: use each board's mounted internal data partition
   // (Tanmatsu FFat 'locfd', P4 LittleFS 'storage'), with SD_MMC as fallback.
@@ -73862,7 +73888,7 @@ static bool uiDataFsReady() {
   // or because reconciliation failed closed. History must follow that same
   // profile decision even when an inserted card carries a valid marker and
   // history from another device. Never use foreign SD history as a fallback.
-  if (SPIFFS.begin(false)) {
+  if (wadaSpiffsBegin(false)) {
     s_ui_data_fs = &SPIFFS;
     s_ui_data_root[0] = '\0';
     return true;
@@ -73876,7 +73902,7 @@ static bool uiDataFsReady() {
     strncpy(s_ui_data_root, "/meshcomod", sizeof s_ui_data_root - 1);
     return true;
   }
-  if (SPIFFS.begin(false)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
+  if (wadaSpiffsBegin(false)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
 #elif defined(HAS_THINKNODE_M9)
   // ThinkNode M9: same Arduino-SD-on-shared-bus shape as the T-Deck (CAP_SD=1;
   // used to fall into the V4 SPIFFS #else, losing the SD-backed deep message
@@ -73887,7 +73913,7 @@ static bool uiDataFsReady() {
     strncpy(s_ui_data_root, "/meshcomod", sizeof s_ui_data_root - 1);
     return true;
   }
-  if (SPIFFS.begin(false)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
+  if (wadaSpiffsBegin(false)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
 #elif defined(HELTEC_LORA_V4_R8)
   // R8 (Expansion Kit V2, REMOVABLE card): follow the boot adoption decision,
   // never bare card presence — mirrors the pager's profile-keyed shape. When
@@ -73903,13 +73929,13 @@ static bool uiDataFsReady() {
     strncpy(s_ui_data_root, "/meshcomod", sizeof s_ui_data_root - 1);
     return true;
   }
-  if (SPIFFS.begin(false) || SPIFFS.begin(true)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
+  if (wadaSpiffsBegin(false) || wadaSpiffsBegin(true)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
 #else
   // V4 (no SD): internal SPIFFS. Format-on-fail so a fresh / never-formatted
   // partition becomes usable — that's the V4 history-loss fix. Safe: only formats
   // an unmountable partition (contents were inaccessible anyway), and only when
   // begin(false) already failed.
-  if (SPIFFS.begin(false) || SPIFFS.begin(true)) {
+  if (wadaSpiffsBegin(false) || wadaSpiffsBegin(true)) {
     s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0';
     return true;
   }

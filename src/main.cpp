@@ -1,4 +1,8 @@
 #include <Arduino.h>   // needed for PlatformIO
+#if defined(ESP32) && defined(DUAL_BOOT_SELECTOR)
+  #include <esp_ota_ops.h>     // dual boot: hand the next boot back to the selector (setup)
+  #include <esp_partition.h>
+#endif
 #include <Mesh.h>
 #include "MyMesh.h"
 #if defined(ESP32_PLATFORM)
@@ -63,6 +67,7 @@ static uint32_t _atoi(const char* sp) {
   DataStore store(LittleFS, rtc_clock);
 #elif defined(ESP32)
   #include <SPIFFS.h>
+  #include "helpers/esp32/DualBootFs.h"   // wadaSpiffsBegin(): the SPIFFS mount, with this firmware's partition label
   #if defined(HAS_WIO_TRACKER_L2)
     #include <SD_MMC.h>
     #include <WioTrackerL2Io.h>
@@ -789,6 +794,16 @@ static void wioTrackerL2GpsProbe() {
 
 void setup() {
   Serial.begin(115200);
+#if defined(ESP32) && defined(DUAL_BOOT_SELECTOR)
+  // Dual boot with a selector in the factory partition (Meshtastic in ota_0, this firmware in ota_1):
+  // hand the next boot back to it, so every power-on offers the choice again. The selector passes a
+  // software restart straight through, so this firmware's own reboots come back here.
+  // Not the recovery-launcher record below: that one only notes the slot in NVS, it leaves otadata alone.
+  if (const esp_partition_t* selector =
+          esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL)) {
+    esp_ota_set_boot_partition(selector);
+  }
+#endif
 #if defined(HAS_RAK_TAP_V2)
   delay(1500);  // USB-CDC enumeration before boot logs
 #else
@@ -1066,7 +1081,7 @@ void setup() {
   // ("Store data on SD"). The SD shares the LoRa SPI bus, already brought up by
   // radio_init() above, so SD.begin's spi.begin is a no-op. Graceful: any SD
   // failure falls back to SPIFFS so the device always boots.
-  bool spiffs_ok = SPIFFS.begin(false);   // try first WITHOUT auto-format
+  bool spiffs_ok = wadaSpiffsBegin(false);   // try first WITHOUT auto-format
   bool sd_storage = false;
 #if defined(HAS_WIO_TRACKER_L2)
   // This target uses a dedicated one-bit SD_MMC bus rather than the LoRa SPI
@@ -1454,7 +1469,7 @@ void setup() {
   // that can afford a multi-second blocking format (before the Wi-Fi/event tasks
   // exist, or deferred to a UI-driven action with a progress notice), and to
   // confirm on hardware that a cold first-format boot survives.
-  if (!sd_storage && !spiffs_ok) SPIFFS.begin(true);   // last resort: format SPIFFS
+  if (!sd_storage && !spiffs_ok) wadaSpiffsBegin(true);   // last resort: format SPIFFS
   Serial.printf("[BOOT] storage: %s\n", sd_storage ? "SD /meshcomod" : "SPIFFS");
 #if defined(ESP32_PLATFORM) && defined(HAS_TOUCH_UI)
   // The card holds this device's data but did not mount: say so on screen, and keep the

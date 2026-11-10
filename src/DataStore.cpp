@@ -256,6 +256,45 @@ bool DataStore::renameFile(FILESYSTEM* fs, const char* from, const char* to) {
 }
 #endif
 
+#if defined(ESP32) && defined(DUAL_BOOT_SELECTOR)
+#include <nvs.h>
+#include <vector>
+#include <string>
+// The namespaces this firmware must leave alone in the shared nvs partition.
+static const char* const kDualBootKeepNs[] = {
+  "dualboot",          // the selector: last choice
+  "meshtastic",        // Meshtastic (platform/esp32, NodeDB)
+  "MeshtasticHTTPS",   // Meshtastic web server certificate
+  "nimble_bond",       // BLE bonds, shared by both firmwares (same chip, same address)
+};
+static esp_err_t dualBootEraseOwnNvs() {
+  std::vector<std::string> mine;
+  // IDF 4.4 iterator API (espressif32 6.x); nvs_entry_next releases the iterator at the end.
+  for (nvs_iterator_t it = nvs_entry_find("nvs", NULL, NVS_TYPE_ANY); it != NULL; it = nvs_entry_next(it)) {
+    nvs_entry_info_t info;
+    nvs_entry_info(it, &info);
+    bool keep = false;
+    for (const char* k : kDualBootKeepNs) keep = keep || strcmp(info.namespace_name, k) == 0;
+    if (keep) continue;
+    bool seen = false;
+    for (const std::string& n : mine) seen = seen || n == info.namespace_name;
+    if (!seen) mine.emplace_back(info.namespace_name);
+  }
+  esp_err_t result = ESP_OK;
+  for (const std::string& n : mine) {
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(n.c_str(), NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+      err = nvs_erase_all(h);
+      if (err == ESP_OK) err = nvs_commit(h);
+      nvs_close(h);
+    }
+    if (err != ESP_OK) result = err;
+  }
+  return result;
+}
+#endif
+
 bool DataStore::formatFileSystem() {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   if (_fsExtra == nullptr) {
@@ -274,7 +313,14 @@ bool DataStore::formatFileSystem() {
   // SPIFFS when it's genuinely the active store.
   bool fs_success = true;
   if (_root[0] == '\0') fs_success = ((fs::SPIFFSFS *)_fs)->format();
+#if defined(DUAL_BOOT_SELECTOR)
+  // Dual boot: the nvs partition is shared with Meshtastic and the selector, so a factory reset
+  // must not erase it whole. Wipe every namespace except theirs (and the BLE bond store, which
+  // both firmwares use for the same chip address: erasing it would unpair the Meshtastic phone too).
+  esp_err_t nvs_err = dualBootEraseOwnNvs();
+#else
   esp_err_t nvs_err = nvs_flash_erase(); // no need to reinit, will be done by reboot
+#endif
   return fs_success && (nvs_err == ESP_OK);
 #else
   #error "need to implement format()"
